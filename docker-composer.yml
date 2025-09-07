@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+  server:
+    build: ./server
+    container_name: ai-fullstack-server
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/workflowdb
+      - SECRET_KEY=${SECRET_KEY:-changeme}
+      - ALGORITHM=HS256
+      - FRONTEND_ORIGIN=http://localhost:3000
+      - CHROMA_PATH=/chroma-data
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DEV_HF_API_KEY=${DEV_HF_API_KEY:-}
+      - DEV_GROQ_API_KEY=${DEV_GROQ_API_KEY:-}
+      - HF_INFERENCE_ENDPOINT=${HF_INFERENCE_ENDPOINT:-}
+      - USE_LOCAL_SENTENCE_TRANSFORMERS=${USE_LOCAL_SENTENCE_TRANSFORMERS:-false}
+      - HF_TIMEOUT=${HF_TIMEOUT:-45}
+    depends_on:
+      - postgres
+    volumes:
+      - chroma_data:/chroma-data
+    networks:
+      - workflow-net
+
+  client:
+    build: ./client
+    container_name: ai-fullstack-client
+    ports:
+      - "3000:80"
+    depends_on:
+      - server
+    networks:
+      - workflow-net
+
+  postgres:
+    image: postgres:15
+    container_name: ai-fullstack-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: workflowdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - workflow-net
+
+volumes:
+  pg_data:
+  chroma_data:
+
+networks:
+  workflow-net:
