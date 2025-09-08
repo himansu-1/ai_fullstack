@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Routes, Route, Link, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import api, { buildWsUrl, fetchSessions, fetchSessionDetail } from './utility/api';
-import ReactFlow, { Background, Controls, MiniMap, Panel, addEdge, useNodesState, useEdgesState, MarkerType, ReactFlowProvider, Handle, Position, ConnectionLineType } from 'reactflow'
+import ReactFlow, { Background, Controls, MiniMap, addEdge, useNodesState, useEdgesState, MarkerType, ReactFlowProvider, Handle, Position, ConnectionLineType } from 'reactflow'
 import type { Node, Edge, Connection, NodeProps } from 'reactflow'
 import 'reactflow/dist/style.css'
 
@@ -68,7 +68,7 @@ function Base() {
 
 function LoginSignup() {
   const [isLogin, setIsLogin] = useState(true);
-  const [formData, setFormData] = useState({ email: 'test@example.com', password: '123456' });
+  const [formData, setFormData] = useState({ email: '', password: '' });
   const navigate = useNavigate();
 
   const handleToggle = () => {
@@ -770,7 +770,7 @@ function ChatAi() {
     );
   };
 
-  const OutputNode: React.FC<NodeProps<FlowNodeData>> = ({ id, data }) => (
+  const OutputNode: React.FC<NodeProps<FlowNodeData>> = ({ id }) => (
     <div className="" onDoubleClick={() => { setIsDirty(true); setNodes((nds) => nds.filter(n => n.id !== id)) }}>
       <Handle type="target" position={Position.Left} id="in" />
       <Card title="Output" subtitle="Chat UI" contentClassName="min-h-[120px]">
@@ -1209,7 +1209,7 @@ function App() {
         <Route path="/" element={<Base />}>
           <Route path="/" element={<LoginSignup />} />
           <Route path="stacks" element={React.createElement(WithAuth(StacksPage))} />
-          {/* <Route path="chatAi" element={React.createElement(WithAuth(ChatAi))} /> */}
+          <Route path="chatAi" element={React.createElement(WithAuth(ChatAi))} />
         </Route>
       </Routes>
     </div>
