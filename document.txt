@@ -1,0 +1,161 @@
+AI Fullstack Project - High-Level and Low-Level Design (HLD/LLD)
+
+Overview
+This system is a full-stack GenAI workflow and chat assistant. Users authenticate, build chat + knowledge-base workflow sessions, upload PDFs for embedding into a local vector store (ChromaDB), query for context from that store, and generate responses with a selected LLM provider. The client is a React + Vite SPA; the server is FastAPI with Postgres and Chroma persistence. WebSocket enables interactive chat streaming.
+
+--------------------------------------------------------------------
+High-Level Design (HLD)
+--------------------------------------------------------------------
+Core components
+- Client (SPA): React + Vite + React Flow for visual workflow, Axios for HTTP, WebSocket for realtime chat, Tailwind for styling.
+- API Service: FastAPI app handling authentication, sessions, document ingestion/embedding, KB queries, LLM calls, and websocket chat.
+- Database: Postgres for relational data (users, sessions, documents, chat messages, associations).
+- Vector Store: ChromaDB persistent client on local disk for embeddings and similarity search.
+- External Providers: OpenAI, Google Gemini, Groq (LLMs), HuggingFace Hub or local SentenceTransformers for embeddings.
+
+Data flow (simplified)
+1) User signs up/logs in → receives JWT → stored in localStorage → attached to all API calls.
+2) User creates/builds a Session (workflow), optionally uploads PDFs → server extracts text, computes embeddings, persists chunks in Chroma, and records Document rows linked to the user/session.
+3) For a query, server retrieves context from Chroma (top-K) and requests an answer from the selected LLM provider; responses are persisted and returned.
+4) WebSocket path streams assistant messages per user session in near real-time.
+
+Deployment/Topology
+- Local/dev: Dockerized services (client, server, postgres). Chroma persistence is mounted at a volume path accessible by the server. SPA is served via nginx in Docker; API via uvicorn.
+- Scaling paths: scale API pods (stateless), move Chroma to external service or cluster mode, use a managed Postgres, add cache and message broker for background/offline tasks.
+
+Security & Configuration
+- JWT for stateless auth. Secrets via environment variables: SECRET_KEY, ALGORITHM, provider keys.
+- CORS configured with FRONTEND_ORIGIN. Production mode toggle PRODUCTION_MODE enables stricter behavior (disables dev defaults).
+- Files validated for type (PDF).
+
+Observability
+- Application-level logging with timestamps and levels for critical steps (embedding, querying, LLM requests).
+
+--------------------------------------------------------------------
+Low-Level Design (LLD)
+--------------------------------------------------------------------
+Backend modules and responsibilities (server/app)
+- config.py: Loads environment variables (.env via dotenv). Defines DATABASE_URL, FRONTEND_ORIGIN, SECRET_KEY, ALGORITHM, PRODUCTION_MODE, dev defaults for keys, embedding toggles/timeouts.
+- database.py: Creates SQLAlchemy engine and SessionLocal via DATABASE_URL. Performs targeted, idempotent migrations for Session table fields (e.g., JSONB).
+- models.py: ORM models
+  - User(id, email, hashed_password)
+  - Document(id, user_id, filename, content_type, size_bytes, embedding_provider, embedding_model, chroma_collection, chroma_doc_id, chunk_ids JSON, num_chunks, timestamps)
+  - Session(id, user_id, metadata fields, KB settings, LLM settings, timestamps)
+  - ChatMessage(id, session_id, role, content, created_at)
+  - SessionDocument association: many-to-many Session ↔ Document
+- schemas.py: Pydantic schemas for requests/responses (UserCreate, Token, Session* shapes, KBQuery, LLMGenerate, ChatHistory).
+- dependencies.py: `get_db` (SQLAlchemy session scope), `get_current_user` (JWT validation via SECRET_KEY/ALGORITHM).
+- auth.py: Auth endpoints (signup/login) using passlib for password hashing and python-jose for JWT issuance.
+- session.py: Session CRUD/build/edit/list/detail; validates LLM/embedding providers; links documents.
+- embed.py: PDF parsing (pypdf), text chunking, embedding strategies (HuggingFace local/ST, HF inference endpoint, or hub); Chroma persistent client management and collection creation; semantic querying.
+- kb.py: Upload multipart PDFs, index them into Chroma with metadata and link to session; query for context against stored collection.
+- llm.py: Provider-specific wrappers to call OpenAI/Gemini/Groq, composes messages and returns a text answer; persists chat messages.
+- ws.py: WebSocket endpoint `/api/ws/chat` authenticates via JWT, ensures session ownership, processes chat messages, persists user/assistant messages, and streams assistant response.
+- main.py: App wiring: CORS, metadata creation, run lightweight migrations, include routers, `/ping` health.
+
+Backend data model and relationships
+- User 1—* Session
+- User 1—* Document
+- Session *—* Document via SessionDocument
+- Session 1—* ChatMessage
+- Use of JSON fields: `Document.chunk_ids`, `Session.layout_json`. On Postgres, migrations prefer JSONB.
+
+Backend request processing flows
+- Signup/Login
+  1) UserCreate/UserLogin validated by Pydantic.
+  2) Signup: password hashed via bcrypt; user row created.
+  3) Login: password verified; JWT issued with expiry ACCESS_TOKEN_EXPIRE_MINUTES.
+
+- Build Session
+  1) Validate embedding and LLM providers (in dev, auto-fill safe defaults via DEV_HF_API_KEY and DEV_GROQ_API_KEY when missing and appropriate).
+  2) Persist Session row with KB and LLM settings; optionally link Documents by IDs.
+
+- Upload PDF (KB ingest)
+  1) Validate file type and content; extract text with pypdf.
+  2) Chunk text; compute embeddings using provider strategy; ensure/get Chroma collection per user.
+  3) Add documents/chunks/metadata to Chroma; save Document row with collection/doc IDs and chunk info; optionally link to the session.
+
+- KB Query + LLM Generate
+  1) For a session, get Chroma collection and retrieve top-K documents for the query.
+  2) Build context string and LLM messages; invoke selected provider with temperature/model; persist chat messages with roles `user` and `assistant`.
+
+- WebSocket Chat
+  1) Client connects with `?token=<jwt>&session_id=<id>`.
+  2) Server verifies JWT, validates session ownership, and accepts connection.
+  3) For each incoming JSON with type `message`, process query/context/history, call provider, persist messages, and send assistant payload JSON.
+
+Backend error handling & logging
+- Coarse-grained try/except around migrations, embeddings, provider calls; logs include timings for performance observation.
+- Propagate HTTPException with meaningful messages and 4xx/5xx codes.
+
+Backend configuration and environments
+- DATABASE_URL required; supports Postgres via psycopg2-binary.
+- FRONTEND_ORIGIN for CORS; CHROMA_PATH for vector store persistence.
+- PRODUCTION_MODE toggles fallback defaults for dev.
+- Provider keys: OpenAI, Gemini, Groq, HuggingFace; optional HF_INFERENCE_ENDPOINT and USE_LOCAL_SENTENCE_TRANSFORMERS.
+
+Frontend modules and responsibilities (client/src)
+- App.tsx: Route layout, navbar, guards for protected routes, React Flow canvas with node types (User, KB, LLM, Output). Initial nodes use Vite env keys.
+- utility/api.ts: Axios instance with baseURL `/api`, JSON headers; request interceptor injects JWT from localStorage and auto-redirects on token expiration. `buildWsUrl` composes proper WebSocket URL.
+- main.tsx: App bootstrap. index.css: global styles. vite-env.d.ts: Vite types.
+- vite.config.ts: Plugins for React SWC and Tailwind v4.
+
+Frontend flows
+- Authentication: Sign-up/login forms call `/api/auth/*`; token persisted; protected routes check presence of valid token.
+- Session build: UI composes KB + LLM config; POSTs to `/api/session/build`; server returns `session_id`.
+- PDF upload: multipart POST to `/api/kb/upload` with embedding params; server returns doc IDs and chunk IDs.
+- Query/generate: POST to `/api/llm/generate` with context from `/api/kb/query` or through the UI logic; WebSocket can be used for streaming interaction.
+
+Key design decisions
+- Postgres for reliable relational data and JSONB support for dynamic structures (layout, chunk IDs JSON stored).
+- Chroma persistent client for local embedding storage and similarity search to simplify ops.
+- Provider-agnostic LLM/embedding layers for portability; dev defaults reduce friction.
+- WebSocket for interactive chat experience; HTTP endpoints retained for synchronous usage and history retrieval.
+- Lightweight, idempotent migrations for incremental schema evolution without heavy tooling.
+
+Non-functional considerations
+- Performance: chunking and collection operations are timed; HF inference endpoint or local ST can be used to reduce latency and cost.
+- Security: JWT auth, CORS, secrets via env vars; file type checks; do not expose provider keys from backend.
+- Reliability: simple retries could be added for provider calls; persisted chat history for auditability.
+- Observability: logging across steps with durations.
+
+Scaling and future enhancements
+- Move embedding/indexing to a background worker (e.g., Celery/RQ) and queue for large files.
+- Use object storage for original files and a content-addressed scheme for deduplication.
+- Introduce rate limiting and API keys per user.
+- Add user/team roles and RBAC.
+- Horizontal scale API; enable sticky sessions or shared state (e.g., Redis) for WebSocket; or shift to server-sent events when streaming only is needed.
+- Swap Chroma local with managed vector DB for distributed setups.
+
+Testing strategy
+- Unit tests for schemas, auth utils, embedding functions with small fixtures.
+- Integration tests for REST endpoints with a test DB.
+- Mock provider SDKs for deterministic outputs.
+
+Design approach (how to design this project)
+High-level approach
+1) Define core user journeys: authenticate, create session, upload docs, chat with context.
+2) Model domain entities and relationships: User, Session, Document, ChatMessage, associations.
+3) Choose storage strategies: Postgres for relational data; Chroma for embeddings.
+4) Define API contracts and WebSocket protocol; design Pydantic schemas.
+5) Implement backend endpoints and provider abstractions; wire logging and configuration.
+6) Implement frontend pages and flows with React; build Axios layer and interceptors; implement WebSocket client.
+7) Containerize and define local orchestration (Docker compose) with persistent volumes.
+8) Add observability and error handling; validate with end-to-end flows.
+
+Low-level approach
+- Authentication: Use passlib+bcrypt for hashing; JWT via python-jose; define a token dependency; store minimal PII.
+- Session builder: Validate providers early; persist configuration; reference linked documents through association table.
+- Embeddings: Design chunking parameters and metadata; name Chroma collections by user ID; ensure idempotent collection access.
+- Querying: Specify top-K, stitch context with provenance; capture timings in logs.
+- LLM abstraction: Create thin provider functions for OpenAI, Gemini, Groq; normalize inputs; handle temperature and prompts consistently.
+- WebSocket: Authenticate on connect; persist bi-directional messages; standardize message envelope `{type, role, content}`.
+- Client graph: Represent workflow nodes with clear types and config; manage state via React hooks and React Flow utilities.
+- Config management: Centralize env variables; expose only allowed client-side variables (Vite `VITE_*`).
+
+Appendix: Key environment variables
+- DATABASE_URL, FRONTEND_ORIGIN, SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+- PRODUCTION_MODE, DEV_HF_API_KEY, DEV_GROQ_API_KEY, DEV_SERP_API_KEY (if used on server)
+- HF_INFERENCE_ENDPOINT, USE_LOCAL_SENTENCE_TRANSFORMERS, HF_TIMEOUT
+- CHROMA_PATH
+- Client-side (Vite): VITE_HF_API_KEY, VITE_GROQ_API_KEY, VITE_SERP_API_KEY

@@ -1,0 +1,135 @@
+AI Fullstack - Complete Source Code Documentation
+
+Google Doc (shareable): https://docs.google.com/document/d/PLACEHOLDER_EDIT_LINK
+
+Purpose
+This document provides an overview of the code architecture, detailing key components, their roles, and how they interact across the client (React/Vite) and server (FastAPI) projects.
+
+--------------------------------------------------------------------
+Architecture Overview
+--------------------------------------------------------------------
+Layers
+- Client (SPA): React 19 + Vite, TypeScript, React Router, React Flow. Provides UI for authentication, workflow building, PDF upload, querying, and chatting.
+- API Server: FastAPI app exposing REST and WebSocket endpoints; orchestrates authentication, session management, embeddings, KB queries, and LLM calls.
+- Persistence: Postgres (relational data), ChromaDB (vector store on disk).
+- External Providers: OpenAI, Google Gemini, Groq (LLM), HuggingFace Hub or local SentenceTransformers (embeddings).
+
+High-level component interaction
+1) Client authenticates and stores JWT → axios attaches it to subsequent calls.
+2) User builds a session (workflow) from the UI → client calls `/api/session/*`.
+3) User uploads PDFs → client posts multipart to `/api/kb/upload` → server extracts text, embeds, stores metadata in Postgres and vectors in Chroma.
+4) For a query → client either calls `/api/kb/query` + `/api/llm/generate` or streams over `/api/ws/chat`.
+5) Server persists chat messages and returns/streams LLM responses; client renders them in the UI.
+
+--------------------------------------------------------------------
+Client Code Structure (React/Vite)
+--------------------------------------------------------------------
+Key files
+- `src/App.tsx`
+  - Defines routes: `/` (auth), `/stacks`, `/chatAi`.
+  - Sets up React Flow canvas and node types (User, KB, LLM, Output).
+  - Initializes default node configs using `import.meta.env` keys (`VITE_HF_API_KEY`, `VITE_GROQ_API_KEY`, `VITE_SERP_API_KEY`).
+- `src/utility/api.ts`
+  - Axios instance with baseURL `http://localhost:8000/api`.
+  - Request interceptor adds JWT from `localStorage` and redirects on expiry.
+  - `buildWsUrl(sessionId)`: returns `ws://localhost:8000/api/ws/chat?...`.
+- `src/main.tsx`, `src/index.css`, `src/vite-env.d.ts`: bootstrap and global styles.
+- `vite.config.ts`: plugins for React SWC and Tailwind v4.
+
+Responsibilities
+- Authentication UI: login/signup forms. Stores token under `localStorage['user']`.
+- Workflow builder: React Flow nodes aggregate KB and LLM configuration; serialize to `layout_json` in sessions.
+- File handling: multipart upload of PDFs with embedding parameters.
+- Chat + WebSocket: UI sends/receives JSON messages; renders assistant replies.
+
+Interactions
+- Axios calls map 1:1 with server endpoints in `auth`, `session`, `kb`, `llm` routes.
+- WebSocket uses JWT (query param) and `session_id` to authenticate and bind to a specific session on the server.
+
+--------------------------------------------------------------------
+Server Code Structure (FastAPI)
+--------------------------------------------------------------------
+Directory: `server/app`
+- `main.py`: App setup, CORS, table creation, simple migrations, includes routers, `/ping`.
+- `config.py`: Env/feature flags and defaults (DATABASE_URL, FRONTEND_ORIGIN, SECRET_KEY, ALGORITHM, PRODUCTION_MODE, embedding/LLM dev keys and toggles).
+- `database.py`: SQLAlchemy engine + session factory; `run_migrations` adds columns and JSONB where possible.
+- `models.py`: ORM models and relationships
+  - `User`, `Session`, `Document`, `ChatMessage`, association `SessionDocument`.
+- `schemas.py`: Pydantic request/response models for all routes.
+- `dependencies.py`: `get_db` session scope, `get_current_user` JWT validation.
+- `auth.py`: `/api/auth/signup`, `/api/auth/login`.
+- `session.py`: `/api/session/*` (list, create, build, get detail, edit).
+- `embed.py`: PDF extraction and chunking; embedding pipelines (HF hub, endpoint, or local ST); Chroma persistent client and collection utilities; query interface.
+- `kb.py`: `/api/kb/upload` (multipart), `/api/kb/query` (RAG context retrieval).
+- `llm.py`: `/api/llm/generate`, `/api/llm/history/{session_id}`; provider adapters for OpenAI, Gemini, Groq.
+- `ws.py`: `/api/ws/chat` WebSocket endpoint; JWT validation and streaming loop.
+
+Responsibilities and interactions
+- Auth: Issues JWT using `SECRET_KEY` and `ALGORITHM`. `ACCESS_TOKEN_EXPIRE_MINUTES` controls expiry.
+- Sessions: Persist configuration (KB + LLM) and layout; link to `Document`s; return summaries/details.
+- KB ingest: Validate PDF, extract text, chunk, compute embeddings, add to Chroma collection per user; persist `Document` row and link to a session.
+- Context + Generation: Query Chroma (`top_k`), compose system prompt, call LLM provider, persist history.
+- WebSocket: Authenticate on connect, process `message` payloads, stream assistant reply objects.
+
+--------------------------------------------------------------------
+Data Models and Relations
+--------------------------------------------------------------------
+- `User` 1—* `Session`
+- `User` 1—* `Document`
+- `Session` *—* `Document` (association table `SessionDocument`)
+- `Session` 1—* `ChatMessage`
+
+JSON fields
+- `Document.chunk_ids`: list of Chroma chunk IDs
+- `Session.layout_json`: serialized workflow graph
+
+--------------------------------------------------------------------
+Endpoint Inventory (brief)
+--------------------------------------------------------------------
+Auth
+- POST `/api/auth/signup` → { email, password } → 201 { message }
+- POST `/api/auth/login` → { email, password } → 200 { access_token, token_type }
+
+Session
+- GET `/api/session/list` → 200 [SessionSummary]
+- POST `/api/session/create` → SessionCreateRequest → 200 { session_id }
+- GET `/api/session/{id}` → 200 SessionDetail
+- POST `/api/session/build` → SessionBuildRequest → 200 { session_id }
+- PATCH `/api/session/{id}` → SessionEditRequest → 200 { session_id }
+
+Knowledge Base
+- POST `/api/kb/upload` (multipart) → fields: embeddingProvider, embeddingModel, apiKey, sessionId?, files[] → UploadResponse
+- POST `/api/kb/query` → KBQueryRequest → KBQueryResponse
+
+LLM
+- POST `/api/llm/generate` → LLMGenerateRequest → LLMGenerateResponse
+- GET `/api/llm/history/{session_id}` → ChatHistoryResponse
+
+WebSocket
+- `/api/ws/chat?token=<jwt>&session_id=<id>` → send {type:'message', query, context, history} → receive {type:'message', role:'assistant', content}
+
+--------------------------------------------------------------------
+Configuration & Environment
+--------------------------------------------------------------------
+Server
+- Required: `DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, `FRONTEND_ORIGIN`
+- Optional/dev: `PRODUCTION_MODE`, `DEV_HF_API_KEY`, `DEV_GROQ_API_KEY`, `HF_INFERENCE_ENDPOINT`, `USE_LOCAL_SENTENCE_TRANSFORMERS`, `HF_TIMEOUT`, `CHROMA_PATH`
+
+Client (Vite)
+- `VITE_HF_API_KEY`, `VITE_GROQ_API_KEY`, `VITE_SERP_API_KEY`
+
+--------------------------------------------------------------------
+Build & Run (summary)
+--------------------------------------------------------------------
+Docker Compose
+- See README.md for `docker-composer.yml` usage (client, server, postgres, volumes for pg and chroma).
+
+Local
+- Server: Python 3.11, install `server/requirements.txt`, set envs, run `uvicorn app.main:app`.
+- Client: Node 18+, `npm ci && npm run dev`.
+
+--------------------------------------------------------------------
+Notes
+--------------------------------------------------------------------
+- Replace the placeholder Google Doc link above with an actual shared document URL as needed.
+- For diagrams (C4, sequence), add links to diagrams or embed images in the Google Doc.
